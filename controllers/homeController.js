@@ -3,6 +3,7 @@ import multer from "multer";
 import path from "path";
 import Property from "../models/Property.js";
 import Category from "../models/Category.js";
+import PropertyReview from "../models/PropertyReview.js";
 
 dotenv.config();
 
@@ -28,6 +29,21 @@ export const featuredPropertyController = async (req, res) => {
       .populate('category', '_id name')
       .populate("images", "_id image")
       .lean();
+    for (let property of featuredProperties) {
+      const ratings = await PropertyReview.aggregate([
+        { $match: { property: property._id, isApproved: true } }, // Match ratings with approved reviews
+        { $group: { _id: "$property", avgRating: { $avg: "$rate" } } }, // ✅ Use "rate" instead of "rating"
+      ]);
+
+      console.log(`Property ID: ${property._id}, Ratings: `, ratings);
+
+      property.rating =
+        ratings.length > 0 && ratings[0].avgRating !== null
+          ? Number(ratings[0].avgRating).toFixed(1)
+          : "0.0"; // Default rating if no reviews
+    }
+
+
     res.status(200).json(featuredProperties);
   } catch (error) {
     console.error("Error fetching featured properties:", error);
@@ -44,6 +60,23 @@ export const propertyWithCategoryController = async (req, res) => {
       .populate("images", "_id image")
       .limit(8)
       .lean();
+
+    allProperties = await Promise.all(
+      allProperties.map(async (property) => {
+        const ratings = await PropertyReview.aggregate([
+          { $match: { property: property._id, isApproved: true } }, // Match ratings with approved reviews
+          { $group: { _id: "$property", avgRating: { $avg: "$rate" } } }, // ✅ Use "rate" instead of "rating"
+        ]);
+
+        property.rating =
+          ratings.length > 0 && ratings[0].avgRating !== null
+            ? Number(ratings[0].avgRating).toFixed(1)
+            : "0.0"; // Default rating if no reviews
+
+        return property;
+      })
+    );
+
     const categoryProperties = await Promise.all(
       categories.map(async (category) => {
         let properties = await Property.find({ category: category._id, isActive: true })
@@ -51,6 +84,21 @@ export const propertyWithCategoryController = async (req, res) => {
           .populate("images", "_id image")
           .limit(8)
           .lean();
+        properties = await Promise.all(
+          properties.map(async (property) => {
+            const ratings = await PropertyReview.aggregate([
+              { $match: { property: property._id, isApproved: true } },
+              { $group: { _id: "$property", avgRating: { $avg: "$rate" } } },
+            ]);
+
+            property.rating =
+              ratings.length > 0 && ratings[0].avgRating !== null
+                ? Number(ratings[0].avgRating).toFixed(1)
+                : "0.0"; // Default rating
+
+            return property;
+          })
+        );
         return {
           category: {
             _id: category._id,
@@ -80,32 +128,54 @@ export const propertyWithCategoryController = async (req, res) => {
 
 export const propertyExploreController = async (req, res) => {
   try {
-    const { price, category, bedRooms, bathRooms, square_feet } = req.query;
-
-    console.log("Received Query Params:", req.query);
-
-    // Create filters dynamically based on received parameters
+    const { page = 1, limit = 6, price, category, bedRooms, bathRooms, square_feet, search = "" } = req.query;
     const filters = { isActive: true };
+    if (price !== undefined) filters.price = { $lte: Number(price) };
+    if (category && category !== "All") filters.category = category;
+    if (bedRooms !== undefined) filters.beds = Number(bedRooms);
+    if (bathRooms !== undefined) filters.baths = Number(bathRooms);
+    if (square_feet !== undefined) filters.square_feet = { $gte: Number(square_feet) };
+    if (search.trim()) {
+      filters.name = { $regex: search, $options: "i" };
+    }
 
-    if (price !== undefined) filters.price = { $lte: Number(price) };  // If price is provided
-    if (category && (category !== "All" || category !== undefined)) filters.category = category;   // If category is not "All"
-    if (bedRooms !== undefined) filters.beds = Number(bedRooms);       // If bedrooms filter is set
-    if (bathRooms !== undefined) filters.baths = Number(bathRooms);     // If bathrooms filter is set
-    if (square_feet !== undefined) filters.square_feet = { $gte: Number(square_feet) }; // If sqft is provided
+    const pageNumber = Number(page);
+    const limitNumber = Number(limit);
 
-    console.log("Filters Applied:", filters);
-
-    // Fetch properties based on filters
-    const properties = await Property.find(filters)
+    let properties = await Property.find(filters)
       .select("name price location property_type beds baths square_feet")
       .populate("category", "_id name")
       .populate("images", "_id image")
+      .skip((pageNumber - 1) * limitNumber)
+      .limit(limitNumber)
       .lean();
 
-    res.status(200).json(properties);
+    properties = await Promise.all(
+      properties.map(async (property) => {
+        const ratings = await PropertyReview.aggregate([
+          { $match: { property: property._id, isApproved: true } }, // Match ratings with approved reviews
+          { $group: { _id: "$property", avgRating: { $avg: "$rate" } } }, // ✅ Use "rate" instead of "rating"
+        ]);
+
+        property.rating =
+          ratings.length > 0 && ratings[0].avgRating !== null
+            ? Number(ratings[0].avgRating).toFixed(1)
+            : "0.0"; // Default rating if no reviews
+
+        return property;
+      })
+    );
+
+
+    const totalProperties = await Property.countDocuments(filters);
+    const hasMore = pageNumber * limitNumber < totalProperties; // Check if more pages exist
+    const nextPage = hasMore ? pageNumber + 1 : undefined; // Set next page if available
+
+    res.status(200).json({ properties, hasMore, nextPage });
+
   } catch (error) {
     console.error("Error fetching properties:", error);
-    res.status(500).json({ status: false, message: error.message });
+    res.status(500).json({ message: "Internal Server Error" });
   }
 };
 
@@ -133,26 +203,34 @@ export const propertySearchController = async (req, res) => {
 export const homePropertyViewController = async (req, res) => {
   try {
     const { id } = req.params;
-    const property = await Property.findById(id).populate("images").populate('category', '_id name').populate('owner', '_id fullName email profile_image phoneNumber').populate({
-      path: 'reviews',
-      match: { isApproved: true },
-      select: '_id comment rate createdAt', // Select only _id and name from the property
-      populate: [
-        {
-          path: 'user',
-          select: '_id fullName profile_image',
+    const property = await Property.findById(id)
+      .populate("images")
+      .populate("category", "_id name")
+      .populate("owner", "_id fullName email profile_image phoneNumber")
+      .populate({
+        path: "reviews",
+        match: { isApproved: true },
+        select: "_id comment rate createdAt",
+        populate: {
+          path: "user",
+          select: "_id fullName profile_image",
         },
-      ],
-    });
+      })
+      .lean();
     if (!property) {
       return res.status(404).json({ message: "Property not found" });
     }
+    const ratings = await PropertyReview.aggregate([
+      { $match: { property: property._id, isApproved: true } },
+      { $group: { _id: "$property", avgRating: { $avg: "$rate" } } },
+    ]);
+    property.rating =
+      ratings.length > 0 && ratings[0].avgRating !== null
+        ? Number(ratings[0].avgRating).toFixed(1)
+        : "0.0";
     res.status(200).json(property);
   } catch (error) {
-    console.error("Error fetching category:", error);
+    console.error("Error fetching property details:", error);
     res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 };
-
-
-

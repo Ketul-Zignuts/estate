@@ -1,6 +1,6 @@
 import User from "../models/User.js";
 import dotenv from "dotenv";
-import bcrypt from "bcrypt";
+import bcrypt from 'bcryptjs';
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import path from "path";
@@ -63,6 +63,7 @@ export const registerController = async (req, res) => {
 
         const salt = await bcrypt.genSalt(10);
         const hashPassword = await bcrypt.hash(password, salt);
+
         const newUser = new User({
           fullName,
           phoneNumber,
@@ -312,6 +313,21 @@ export const userUpdateController = async (req, res) => {
       message: "Internal server error",
       error: error.message,
     });
+  }
+};
+
+export const userPushTokenStoreController = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { pushToken } = req.body;
+    if (!pushToken) {
+      return res.status(400).json({ message: "Push token is required" });
+    }
+    await User.findByIdAndUpdate(userId, { pushToken }, { new: true });
+    res.status(200).json({ message: "Push token saved successfully" });
+  } catch (error) {
+    console.error("Error while saving push token:", error);
+    res.status(500).json({ message: "Internal server error" });
   }
 };
 
